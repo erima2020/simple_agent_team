@@ -4,11 +4,20 @@ import sys
 import csv
 from datetime import datetime
 import random
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY not found in .env file")
+
 
 def get_completion(prompt):
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key="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",
+        api_key=OPENROUTER_API_KEY,
     )
 
     completion = client.chat.completions.create(
