@@ -1,7 +1,7 @@
 # Configuration Guide for Simple Agent Team (AI-Driven Agent Collaboration)
 
 ## Overview
-This Python script utilizes the OpenRouter API to orchestrate teams of AI-driven agents with distinct expertise for collaborative problem-solving. A ModeratorAgent summarizes discussions, and a JudgeAgent formulates the final solution. The script supports agent swapping for diverse perspectives, saves outputs to a CSV file, and allows post-evaluation queries to the JudgeAgent. It is adaptable for various problem domains.
+This Python script utilizes the OpenRouter API to orchestrate teams of AI-driven agents with distinct expertise for collaborative problem-solving. A ModeratorAgent summarizes discussions, and a JudgeAgent formulates the final solution. The script supports agent swapping for diverse perspectives, saves outputs to a CSV file, and allows post-evaluation queries to the JudgeAgent. It is adaptable for various problem domains. Written with the help of AI.
 
 ## Configuration
 To configure the script, an OpenRouter API key is required. Follow these steps:
