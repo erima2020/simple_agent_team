@@ -1,4 +1,5 @@
 from openai import OpenAI
+import os
 import sys
 import csv
 from datetime import datetime
