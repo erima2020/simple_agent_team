@@ -5,6 +5,12 @@ import csv
 from datetime import datetime
 import random
 from dotenv import load_dotenv
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -14,24 +20,47 @@ if not OPENROUTER_API_KEY:
     raise ValueError("OPENROUTER_API_KEY not found in .env file")
 
 
-def get_completion(prompt):
+def get_completion(prompt, max_retries=3, initial_backoff=1):
+    """
+    Fetches a completion from the OpenAI API with retry logic and exponential backoff.
+
+    Args:
+        prompt (str): The prompt to send to the API.
+        max_retries (int): The maximum number of retry attempts.
+        initial_backoff (int): The initial backoff time in seconds.
+
+    Returns:
+        str: The API response content.
+
+    Raises:
+        Exception: If all retry attempts fail.
+    """
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
     )
-
-    completion = client.chat.completions.create(
-        model="deepseek/deepseek-chat-v3.1:free",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0
-    )
-    content = completion.choices[0].message.content
-    return content
+    
+    backoff_time = initial_backoff
+    for attempt in range(max_retries + 1):  # +1 to include the initial attempt
+        try:
+            completion = client.chat.completions.create(
+                model="deepseek/deepseek-chat-v3.1:free",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0
+            )
+            content = completion.choices[0].message.content
+            return content  # Success, return the content
+            
+        except Exception as e:
+            if attempt == max_retries:  # If this was the final attempt
+                error_msg = f"API call failed after {max_retries} retries. Error: {str(e)}"
+                logger.error(error_msg)
+                # Here you could potentially call a fallback function, e.g., use_a_local_model(prompt)
+                raise Exception(error_msg) from e  # Re-raise the exception to be handled upstream
+                
+            logger.warning(f"API call failed (attempt {attempt + 1}/{max_retries}). Retrying in {backoff_time}s. Error: {str(e)}")
+            time.sleep(backoff_time)
+            backoff_time *= 2  # Exponential backoff for the next retry
 
 class Agent:
     def __init__(self, name, expertise, original_team_id=None):
@@ -48,18 +77,35 @@ class Agent:
         prompt += "Include background, personality, and specific skills. Keep under 200 words."
         self.persona = get_completion(prompt).strip()
 
-    def respond(self, solution_history, prompt, round_num, team_id):
-        full_prompt = f"You are {self.name}, with this persona: {self.persona}. "
-        full_prompt += f"Your expertise is {self.expertise}. "
-        full_prompt += f"Problem: {problem}\n\n"
-        full_prompt += f"You are in Round {round_num}, Team {team_id}.\n"
+    def respond(self, solution_history, prompt, round_num, team_id, problem, current_team_agents, use_tom=False):
+        base_prompt = f"You are {self.name}, with this persona: {self.persona}. "
+        base_prompt += f"Your expertise is {self.expertise}. "
+        base_prompt += f"Problem: {problem}\n\n"
+        base_prompt += f"You are in Round {round_num}, Team {team_id}.\n"
         if round_num > 1:
-        	full_prompt += "The composition of the team is now different from Round 1."
-        full_prompt += "Previous conversations you were part of:\n" + "\n".join(self.memory) + "\n\n" if self.memory else "You have no previous conversation history.\n\n"
-        full_prompt += "Current team discussion:\n" + "\n".join(solution_history) + "\n\n" if solution_history else "No current team discussion yet.\n\n"
-        full_prompt += prompt + "\n\nRespond naturally as in a dialogue or conversation with your colleagues. Keep your response concise, under 300 words. Write in full paragraphs - do NOT use bullet points, numbered lists, or any list formatting. The discussion should take the form of a debate, but you can also agree to points that are largely compatible with your perspective. Reference specific ideas from previous speakers in your current team or from your own past team conversations (stored in your memory), but do NOT reference discussions from teams you were not part of."
-        response = get_completion(full_prompt).strip()
-        return response
+            base_prompt += "The composition of the team is now different from Round 1."
+        base_prompt += "Previous conversations you were part of:\n" + "\n".join(self.memory) + "\n\n" if self.memory else "You have no previous conversation history.\n\n"
+        base_prompt += "Current team discussion:\n" + "\n".join(solution_history) + "\n\n" if solution_history else "No current team discussion yet.\n\n"
+        base_prompt += prompt + "\n\n"
+
+        if use_tom:
+            colleagues = [a for a in current_team_agents if a != self]
+            colleagues_desc = "\n".join([f"{a.name} ({a.expertise}): {a.persona}" for a in colleagues])
+            tom_instruction = f"Colleagues in your team: {colleagues_desc}\n\nBefore contributing, use theory of mind to anticipate your colleagues' likely views based on their expertise and the discussion so far. Output only your ToM anticipation in a concise paragraph under 100 words."
+            tom_prompt = base_prompt + tom_instruction
+            tom_anticipation = get_completion(tom_prompt).strip()
+
+            full_prompt = base_prompt
+            full_prompt += "Before contributing, use theory of mind to anticipate your colleagues' likely views based on their expertise and the discussion so far, then frame your response to complement, build on, or constructively challenge them. "
+            full_prompt += f"Your anticipation: {tom_anticipation}\n\n"
+            full_prompt += "Respond naturally as in a dialogue or conversation with your colleagues. Your anticipatory thoughts should guide your response but you shouldn't mention their content explicitely. Do not confuse what you think your conversational partners will say next with something they actually said. Keep your response concise, under 300 words. Write in full paragraphs - do NOT use bullet points, numbered lists, or any list formatting. The discussion should take the form of a debate, but you can also agree to points that are largely compatible with your perspective. Reference specific ideas from previous speakers in your current team or from your own past team conversations (stored in your memory), but do NOT reference discussions from teams you were not part of."
+            response = get_completion(full_prompt).strip()
+            return tom_anticipation, response
+        else:
+            full_prompt = base_prompt
+            full_prompt += "Respond naturally as in a dialogue or conversation with your colleagues. Keep your response concise, under 300 words. Write in full paragraphs - do NOT use bullet points, numbered lists, or any list formatting. The discussion should take the form of a debate, but you can also agree to points that are largely compatible with your perspective. Reference specific ideas from previous speakers in your current team or from your own past team conversations (stored in your memory), but do NOT reference discussions from teams you were not part of."
+            response = get_completion(full_prompt).strip()
+            return None, response
 
 class JudgeAgent:
     def __init__(self, name="Judge", expertise="solution synthesis and evaluation"):
@@ -172,6 +218,15 @@ def get_num_agents_to_swap(num_agents, num_teams):
         except ValueError:
             print("Please enter a valid integer.")
 
+def get_use_tom():
+    while True:
+        use = input("Enable Theory of Mind (ToM) prompting? (y/n): ").strip().lower()
+        if use in ['y', 'yes']:
+            return True
+        elif use in ['n', 'no']:
+            return False
+        print("Please enter y or n.")
+
 def generate_relevant_expertises(problem, num_agents, team_id, num_teams):
     prompt = f"Given the problem: '{problem}', generate a list of {num_agents} distinct areas of expertise relevant to solving this problem. "
     prompt += f"This is for Team {team_id} out of {num_teams} teams, so provide a unique perspective and approach different from other teams. "
@@ -192,7 +247,7 @@ def get_agent_expertises(num_agents, problem, team_id, num_teams):
         agents_config.append((name, expertise, team_id))
     return agents_config
 
-def save_solutions_to_csv(problem, all_teams_agents, moderator, judge, all_team_solutions, all_team_summaries, final_solution, second_round_teams=None, second_round_solutions=None, second_round_summaries=None):
+def save_solutions_to_csv(problem, all_teams_agents, moderator, judge, all_team_solutions, all_team_summaries, final_solution, all_team_contribs, second_round_teams=None, second_round_solutions=None, second_round_summaries=None, second_round_contribs=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"solutions_{problem[:40].replace(' ', '_')}_{timestamp}.csv"
     with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
@@ -211,12 +266,14 @@ def save_solutions_to_csv(problem, all_teams_agents, moderator, judge, all_team_
         persona_safe = judge.persona.replace('\n', '\\n')
         writer.writerow(["Judge", judge.name, judge.expertise, persona_safe, ""])
         
-        # Write first-round team contributions
-        for team_idx, team_solutions in enumerate(all_team_solutions, 1):
-            for contribution in team_solutions:
-                agent_name, text = contribution.split(": ", 1)
-                text_safe = text.replace('\n', '\\n')
-                writer.writerow([f"Team{team_idx}", agent_name, "", "", text_safe])
+        # Write first-round contributions
+        for team_idx, team_contribs in enumerate(all_team_contribs, 1):
+            for contrib in team_contribs:
+                if contrib['tom']:
+                    tom_safe = contrib['tom'].replace('\n', '\\n')
+                    writer.writerow([f"Team{team_idx}", f"{contrib['agent']}_ToM", "", "", tom_safe])
+                resp_safe = contrib['response'].replace('\n', '\\n')
+                writer.writerow([f"Team{team_idx}", contrib['agent'], "", "", resp_safe])
         
         # Write first-round summaries
         for team_idx, team_summary in enumerate(all_team_summaries[:len(all_team_solutions)], 1):
@@ -224,16 +281,18 @@ def save_solutions_to_csv(problem, all_teams_agents, moderator, judge, all_team_
             writer.writerow([f"Team{team_idx}_Summary", moderator.name, "", "", summary_safe])
         
         # Write second-round teams and contributions if applicable
-        if second_round_teams and second_round_solutions and second_round_summaries:
+        if second_round_teams and second_round_solutions and second_round_summaries and second_round_contribs:
             for team_idx, agents in enumerate(second_round_teams, 1):
                 for agent in agents:
                     writer.writerow([f"SecondRound_Team{team_idx}", agent.name, agent.expertise, agent.persona.replace('\n', '\\n'), ""])
             
-            for team_idx, team_solutions in enumerate(second_round_solutions, 1):
-                for contribution in team_solutions:
-                    agent_name, text = contribution.split(": ", 1)
-                    text_safe = text.replace('\n', '\\n')
-                    writer.writerow([f"SecondRound_Team{team_idx}", agent_name, "", "", text_safe])
+            for team_idx, team_contribs in enumerate(second_round_contribs, 1):
+                for contrib in team_contribs:
+                    if contrib['tom']:
+                        tom_safe = contrib['tom'].replace('\n', '\\n')
+                        writer.writerow([f"SecondRound_Team{team_idx}", f"{contrib['agent']}_ToM", "", "", tom_safe])
+                    resp_safe = contrib['response'].replace('\n', '\\n')
+                    writer.writerow([f"SecondRound_Team{team_idx}", contrib['agent'], "", "", resp_safe])
             
             # Write second-round summaries
             for team_idx, team_summary in enumerate(second_round_summaries, 1):
@@ -246,8 +305,9 @@ def save_solutions_to_csv(problem, all_teams_agents, moderator, judge, all_team_
     
     print(f"\nSolutions saved to {filename}")
 
-def run_team_solving(team_id, agents, problem, turns_per_agent, round_name="First Round", round_num=1):
+def run_team_solving(team_id, agents, problem, turns_per_agent, round_name="First Round", round_num=1, use_tom=False):
     solution_history = []
+    team_contribs = []
     
     print(f"\n{'='*60}")
     print(f"{round_name.upper()} - TEAM {team_id}")
@@ -262,15 +322,18 @@ def run_team_solving(team_id, agents, problem, turns_per_agent, round_name="Firs
             else:
                 agent_prompt = "Continue the discussion by responding to your colleagues' points, refining ideas, building on good suggestions, or raising concerns based on your expertise."
             
-            response = agent.respond(solution_history, agent_prompt, round_num, team_id)
-            print(f"{agent.name} ({agent.expertise}): {response}\n")
+            tom_anticipation, response = agent.respond(solution_history, agent_prompt, round_num, team_id, problem, agents, use_tom)
             solution_history.append(f"{agent.name}: {response}")
+            if use_tom:
+            	print(f"{agent.name} ({agent.expertise}) * ToM *: {tom_anticipation}\n")
+            print(f"{agent.name} ({agent.expertise}): {response}\n")
+            team_contribs.append({'agent': agent.name, 'tom': tom_anticipation, 'response': response})
     
     # Store the full team conversation in each agent's memory
     for agent in agents:
         agent.memory.append(f"Round {round_num}, Team {team_id} Conversation:\n" + "\n".join(solution_history))
     
-    return solution_history
+    return solution_history, team_contribs
 
 def swap_agents(all_teams_agents, num_agents_to_swap, num_agents):
     if len(all_teams_agents) < 2:
@@ -362,11 +425,15 @@ def multi_agent_problem_solving(problem, turns_per_agent=3):
     num_teams = get_num_teams()
     num_agents = get_num_agents()
 
+    num_agents_to_swap = 0
     if num_teams > 1:    
-            num_agents_to_swap = get_num_agents_to_swap(num_agents, num_teams)
+        num_agents_to_swap = get_num_agents_to_swap(num_agents, num_teams)
+    
+    use_tom = get_use_tom()
     
     all_teams_agents = []
     all_team_solutions = []
+    all_team_contribs = []
     all_team_summaries = []
     
     print("\nGenerating Teams and Personas:\n")
@@ -396,8 +463,9 @@ def multi_agent_problem_solving(problem, turns_per_agent=3):
     print(f"{'='*60}\n")
 
     for team_id, agents in enumerate(all_teams_agents, 1):
-        team_solutions = run_team_solving(team_id, agents, problem, turns_per_agent, "First Round", round_num=1)
+        team_solutions, team_contribs = run_team_solving(team_id, agents, problem, turns_per_agent, "First Round", round_num=1, use_tom=use_tom)
         all_team_solutions.append(team_solutions)
+        all_team_contribs.append(team_contribs)
         
         print(f"\n{'='*60}")
         print(f"MODERATOR'S SYNTHESIS OF TEAM {team_id} (First Round)")
@@ -408,6 +476,7 @@ def multi_agent_problem_solving(problem, turns_per_agent=3):
 
     second_round_teams = None
     second_round_solutions = None
+    second_round_contribs = None
     second_round_summaries = None
 
     if num_teams > 1:
@@ -417,6 +486,7 @@ def multi_agent_problem_solving(problem, turns_per_agent=3):
         second_round_teams = swap_agents(all_teams_agents, num_agents_to_swap, num_agents)
         
         second_round_solutions = []
+        second_round_contribs = []
         second_round_summaries = []
         
         for team_id, agents in enumerate(second_round_teams, 1):
@@ -424,8 +494,9 @@ def multi_agent_problem_solving(problem, turns_per_agent=3):
             for agent in agents:
                 print(f"- {agent.name} ({agent.expertise})")
             
-            team_solutions = run_team_solving(team_id, agents, problem, turns_per_agent, "Second Round", round_num=2)
+            team_solutions, team_contribs = run_team_solving(team_id, agents, problem, turns_per_agent, "Second Round", round_num=2, use_tom=use_tom)
             second_round_solutions.append(team_solutions)
+            second_round_contribs.append(team_contribs)
             
             print(f"\n{'='*60}")
             print(f"MODERATOR'S SYNTHESIS OF TEAM {team_id} (Second Round)")
@@ -442,7 +513,7 @@ def multi_agent_problem_solving(problem, turns_per_agent=3):
     final_solution = judge.evaluate_solutions(all_team_summaries, problem)
     print(f"{judge.name} ({judge.expertise}): {final_solution}\n")
 
-    save_solutions_to_csv(problem, all_teams_agents, moderator, judge, all_team_solutions, all_team_summaries, final_solution, second_round_teams, second_round_solutions, second_round_summaries)
+    save_solutions_to_csv(problem, all_teams_agents, moderator, judge, all_team_solutions, all_team_summaries, final_solution, all_team_contribs, second_round_teams, second_round_solutions, second_round_summaries, second_round_contribs)
     
     judge.interact_with_user(all_team_summaries, problem)
     
